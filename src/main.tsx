@@ -2694,7 +2694,7 @@ function Account() {
             const f = new FormData(e.currentTarget);
             const email = String(f.get("email")),
               password = String(f.get("password"));
-            const { error } = register
+            const { data, error } = register
               ? await supabase.auth.signUp({
                   email,
                   password,
@@ -2704,15 +2704,20 @@ function Account() {
                 })
               : await supabase.auth.signInWithPassword({ email, password });
             setBusy(false);
+            const confirmationRequired = register && !data.session;
             notify(
               error
                 ? error.message
                 : t(
                     register
-                      ? "Check your email to confirm your account."
+                      ? confirmationRequired
+                        ? "Check your email to confirm your account."
+                        : "Welcome to Maison Noir. Your account is ready."
                       : "Welcome back to Maison Noir.",
                     register
-                      ? "تحقق من بريدك لتأكيد حسابك."
+                      ? confirmationRequired
+                        ? "تحقق من بريدك لتأكيد حسابك."
+                        : "مرحباً بك في ميزون نوار. حسابك جاهز."
                       : "مرحباً بعودتك إلى ميزون نوار.",
                   ),
             );
