@@ -12,7 +12,7 @@ cp .env.example .env
 npm run dev
 ```
 
-Open the Vite URL. The server binds to `0.0.0.0` and accepts the Arena preview hostname. `npm run build` performs TypeScript checking and builds the static production site. Deploy `dist/` to a static host with an SPA fallback to `index.html` (a Netlify redirect is included; a Vercel rewrite is included).
+Open the Vite URL. The server binds to `0.0.0.0` and accepts the Arena preview hostname. `npm run build` performs TypeScript checking and builds the static production site. Deploy to Vercel: `vercel.json` supplies the SPA fallback while `/api/*` remains on Vercel Functions. Static hosting alone cannot run the backend.
 
 ## What works without credentials
 
@@ -25,38 +25,56 @@ Open the Vite URL. The server binds to `0.0.0.0` and accepts the Arena preview h
 
 **No fake backend actions:** without Supabase, signup, orders, reviews, contact messages, and subscriptions explicitly say integration is required. Nothing is silently submitted. Online payments never display a success confirmation. The WhatsApp-style contact button opens Contact until a genuine number is configured.
 
-## Connect Supabase
+## Backend architecture
+
+The storefront is a Vite SPA served by Vercel. All privileged work runs in Vercel Functions inside `api/`, backed by Supabase (Postgres, Auth, Storage and Realtime):
+
+| Endpoint                            | Action                                         | Authorization          |
+| ----------------------------------- | ---------------------------------------------- | ---------------------- |
+| `POST /api/shop`                    | `orders/create`                                | Valid customer JWT     |
+| `POST /api/shop`                    | `coupons/validate`                             | Public, rate-limited   |
+| `POST /api/shop`                    | `reviews/add`                                  | Valid customer JWT     |
+| `GET /api/health`                   | API + database readiness                       | Public                 |
+| `POST /api/payments/webhook?hmac=…` | Paymob processed-transaction reconciliation    | Paymob SHA-512 HMAC    |
+
+The browser only receives `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`. The service-role key exists **only** in Vercel environment variables and is used exclusively by the server functions. Coupon validation returns the discount percentage, never coupon rows. Every order is still created by the `create_order(payload)` database transaction, which ignores forged client totals, locks stock and coupons, and writes the order atomically.
+
+The storefront posts to `/api/shop` from `src/lib.ts`; it no longer depends on Supabase Edge Functions. Direct customer order `INSERT` is deliberately blocked by RLS.
+
+### Provisioned backend (this deployment)
+
+- Supabase project **maison-noir-perfume** (`scebpezayktuffizwotz`, region `eu-central-1`).
+- Two applied migrations: `initial_schema` and `seed_demo_catalog`.
+- 90 products, 6 categories, 27 shipping rates, and the `MAISON10` coupon (10%).
+- RLS enabled on every table; 23 policies; `create_order`, `collect_cod_payment`, `record_payment`, `is_admin`, and `update_product_rating` installed.
+- Auth: email/password, Site URL and redirects point at `https://maison-noir-perfume.vercel.app`.
+- **Email confirmation is currently disabled** (`mailer_autoconfirm = true`) because no verified sender/SMTP is configured. Turn it back on in Supabase → Authentication → Providers once a real sender is verified.
+- There is no seeded administrator. Create your account on `/account`, then promote it once in the SQL editor:
+  ```sql
+  insert into public.admins (id)
+  select id from auth.users where email = 'owner@example.com'
+  on conflict (id) do nothing;
+  ```
+- No payment gateway credentials are configured; only cash on delivery can create an order.
+
+### Provision a fresh Supabase project
 
 1. Create a Supabase project.
-2. In SQL Editor run `supabase/schema.sql` **once**, followed by `supabase/seed.sql`. The schema contains tables, indexes, Auth signup trigger, RLS policies, storage configuration, server-authoritative order creation, rating updates, payment reconciliation, and Realtime publication entries.
-3. Set browser-safe values in `.env`:
+2. Run `supabase/schema.sql` **once**, followed by `supabase/seed.sql` (or apply both as migrations). This creates tables, indexes, the Auth signup trigger, RLS policies, the storage bucket, server-authoritative order creation, rating updates, payment reconciliation, and Realtime publication entries.
+3. In Supabase Auth, set the real Site URL and allow the exact `<origin>/reset-password` redirect for every environment. Configure a verified email sender before enabling confirmations.
+4. Add environment variables in **Vercel → Project → Settings → Environment Variables**:
    ```env
    VITE_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
    VITE_SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY
+   SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+   SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY
+   SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY   # server only, never VITE_
+   VITE_SITE_URL=https://YOUR_PRODUCTION_DOMAIN      # production target only
    ```
-4. Restart Vite. Products and shipping rates load from Supabase. Product updates and customer order tracking subscribe to Realtime. If your project already publishes these tables, omit the final `ALTER PUBLICATION` statement when installing.
-5. In Supabase Auth, enable email/password, configure your Site URL and permitted redirect URLs, and configure your email sender. Email confirmation is respected; signup prompts users to confirm their address.
-6. Install / authenticate the Supabase CLI, link your project, and deploy:
-   ```sh
-   supabase link --project-ref YOUR_PROJECT_REF
-   supabase functions deploy shop
-   supabase functions deploy payments-webhook
-   supabase secrets set SITE_ORIGIN=https://YOUR_STOREFRONT_DOMAIN
-   ```
-   `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` are provided to hosted Edge Functions by Supabase. Never put a service-role key in `.env` with a `VITE_` prefix, browser code, or Git.
+5. Redeploy. `GET /api/health` should return `{"ok":true,"database":"ok","products":90,...}`.
+6. Products and shipping rates load from Supabase in the browser; product updates and customer order tracking subscribe to Realtime. If the project already publishes these tables, omit the final `ALTER PUBLICATION` statement when installing.
 
-### API contract
-
-This static Vite app does **not** pretend to host an API server. APIs use the deployed Supabase Edge Function URL `/functions/v1/shop`, with a JSON `action` field:
-
-| Logical operation            | Action / endpoint                       | Authorization       |
-| ---------------------------- | --------------------------------------- | ------------------- |
-| `POST /api/orders/create`    | `shop`, `action: "orders/create"`       | Valid customer JWT  |
-| `POST /api/coupons/validate` | `shop`, `action: "coupons/validate"`    | Public validation   |
-| `POST /api/reviews/add`      | `shop`, `action: "reviews/add"`         | Valid customer JWT  |
-| `POST /api/payments/webhook` | `/functions/v1/payments-webhook?hmac=…` | Paymob SHA-512 HMAC |
-
-`supabase.functions.invoke` sends the current session automatically. Edge Functions handle CORS and verify authenticated operations using `auth.getUser()`. Public coupon validation returns only the discount percentage, never the coupon table.
+For local development with a working backend, use `vercel dev` after pulling the environment (`vercel env pull`). With `npm run dev` and no credentials, the explicitly labelled local demonstration catalog is shown and checkout stays disabled.
 
 Orders use the database `create_order(payload)` transaction. It validates quantities, product IDs, stock, coupon eligibility and delivery fields; locks product and coupon records; reads current prices and shipping rates; calculates discounts and gift wrap; creates pending orders and order items; decrements stock; increments sales / coupon uses; and clears the server cart atomically. Forged client prices/totals are ignored. Direct customer order INSERT is deliberately disallowed by RLS to prevent spoofed totals/payment status. Unknown governorates use the specified 75 EGP fallback.
 
@@ -131,17 +149,20 @@ A Paymob processed-transaction webhook scaffold is included with SHA-512 HMAC va
 
 To enable live online payments:
 
-1. Obtain a merchant account and confirm enabled payment methods. Store `PAYMOB_API_KEY`, `PAYMOB_INTEGRATION_ID`, `PAYMOB_IFRAME_ID`, and `PAYMOB_HMAC_SECRET` only as Supabase secrets.
+1. Obtain a merchant account and confirm enabled payment methods. Store `PAYMOB_API_KEY`, `PAYMOB_INTEGRATION_ID`, `PAYMOB_IFRAME_ID`, and `PAYMOB_HMAC_SECRET` only in Vercel environment variables (never with a `VITE_` prefix).
 2. Implement a server-side payment-initiation function: create a server-priced pending order, create a Paymob order with `merchant_order_id` = our `orders.id`, obtain a payment key, and return a hosted checkout URL. Modify `create_order` to allow only methods enabled by server configuration. Do not enable methods simply by changing the frontend label.
 3. Replace placeholders with hosted payment components. Never store or send raw card details to the app database.
-4. Configure the callback at the deployed `payments-webhook` URL. Verify against the exact callback contract and HMAC examples in your current Paymob merchant documentation. Test pending, success, failure, retries, amount mismatches, and signature failures in sandbox before launch. Authorization-only, void/refund, and reversal lifecycles require dedicated handling; do not use a generic "success" redirect as proof of payment.
+4. Configure the callback at `https://YOUR_PRODUCTION_DOMAIN/api/payments/webhook?hmac=…`. Verify against the exact callback contract and HMAC examples in your current Paymob merchant documentation. Test pending, success, failure, retries, amount mismatches, and signature failures in sandbox before launch. Authorization-only, void/refund, and reversal lifecycles require dedicated handling; do not use a generic "success" redirect as proof of payment.
 5. Implement refund / cancellation operations and a retryable notification outbox / monitoring for production reliability. The current notification scaffold logs failures; it does not automatically retry delivery.
 
-Optional notifications after verified paid callbacks:
+Optional notifications after verified paid callbacks (Vercel environment variables):
 
-```sh
-supabase secrets set RESEND_API_KEY=... RESEND_FROM_EMAIL='Maison Noir <orders@YOUR_VERIFIED_DOMAIN>'
-supabase secrets set TWILIO_SID=... TWILIO_TOKEN=... TWILIO_FROM=...
+```env
+RESEND_API_KEY=...
+RESEND_FROM_EMAIL="Maison Noir <orders@YOUR_VERIFIED_DOMAIN>"
+TWILIO_SID=...
+TWILIO_TOKEN=...
+TWILIO_FROM=...
 ```
 
 Phone numbers should be normalized to E.164 before enabling SMS. Without configured sender/keys, callbacks log notification omissions and do not claim an email/SMS was sent. Newsletter and contact messages are persisted to their respective tables when connected; no marketing campaign is sent automatically. Add CAPTCHA, rate limits, explicit consent/privacy terms and unsubscribe management before using public forms in production.
