@@ -57,6 +57,17 @@ The storefront posts to `/api/shop` from `src/lib.ts`; it no longer depends on S
   ```
 - No payment gateway credentials are configured; only cash on delivery can create an order.
 
+### Promoting a staged production deployment
+
+This Vercel project currently has **Auto-assign Custom Production Domains** disabled (`autoAssignCustomDomains: false`), so every production build finishes as `Staged`: the deployment is ready and reachable on its own URL, but `https://maison-noir-perfume.vercel.app` keeps serving the previous build until it is promoted.
+
+After a deployment reports `READY`:
+
+1. Vercel → project **maison-noir-perfume** → **Deployments** → `…` on the staged deployment → **Promote to Production** (or `npx vercel promote <deployment-url>`).
+2. Confirm the public domain serves the new build: `curl https://maison-noir-perfume.vercel.app/api/health` → `{"ok":true,"service":"maison-noir-api","database":"ok","products":90,...}`.
+
+To make future pushes publish themselves, enable **Settings → Environments → Production → Branch Tracking → Auto-assign Custom Production Domains** (older UI: **Settings → Git**). Promotion does not rebuild — it re-points the domains to the staged build.
+
 ### Provision a fresh Supabase project
 
 1. Create a Supabase project.
