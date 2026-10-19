@@ -1,0 +1,7 @@
+[functions.shop]
+verify_jwt = false
+# The shop function verifies authenticated actions with auth.getUser().
+# Coupon validation is intentionally available to anonymous customers.
+[functions.payments-webhook]
+verify_jwt = false
+# Paymob callbacks are authenticated with HMAC, never a user JWT.
