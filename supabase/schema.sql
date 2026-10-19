@@ -23,6 +23,12 @@ create table public.orders (
  gift_wrap boolean not null default false,gift_card_text text,governorate text not null,name text not null,phone text not null,address text not null,
  created_at timestamptz not null default now()
 );
+-- Per-customer retry protection and auditable cash collection.
+alter table public.orders add column idempotency_key uuid;
+alter table public.orders add column request_fingerprint text;
+alter table public.orders add column payment_collected_at timestamptz;
+alter table public.orders add column payment_collected_by uuid references auth.users(id) on delete set null;
+create unique index orders_checkout_request on public.orders(customer_id,idempotency_key) where idempotency_key is not null;
 create table public.order_items (id uuid primary key default gen_random_uuid(),order_id uuid not null references public.orders on delete cascade,product_id uuid not null references public.products,quantity integer not null check(quantity>0),price integer not null check(price>=0));
 create table public.reviews (id uuid primary key default gen_random_uuid(),product_id uuid not null references public.products on delete cascade,customer_id uuid not null references public.customers on delete cascade,rating integer not null check(rating between 1 and 5),comment text not null check(char_length(comment) between 1 and 1500),created_at timestamptz not null default now(),unique(product_id,customer_id));
 create table public.carts (customer_id uuid primary key references auth.users on delete cascade,items jsonb not null default '[]',updated_at timestamptz not null default now());
@@ -80,9 +86,20 @@ create policy admin_read on public.contact_messages for select to authenticated 
 -- Atomic server-authoritative order creation: locks products/coupon, recalculates all amounts, rejects unknown stock/quantity.
 create or replace function public.create_order(payload jsonb) returns jsonb
 language plpgsql security definer set search_path=public as $$
-declare uid uuid:=auth.uid(); item jsonb; p public.products%rowtype; cp public.coupons%rowtype; qty int; unit int; sub int:=0; ship int; disc int:=0; result uuid; snapshot jsonb:='[]'; wrap boolean:=coalesce((payload->>'gift_wrap')::boolean,false); coupon_code text:=upper(trim(coalesce(payload->>'discount_code',''))); gov text:=payload->>'governorate';
+declare uid uuid:=auth.uid(); item jsonb; p public.products%rowtype; cp public.coupons%rowtype; qty int; unit int; sub int:=0; ship int; disc int:=0; result uuid; snapshot jsonb:='[]'; wrap boolean:=coalesce((payload->>'gift_wrap')::boolean,false); coupon_code text:=upper(trim(coalesce(payload->>'discount_code',''))); gov text:=payload->>'governorate'; request_key uuid; fingerprint text; previous public.orders%rowtype;
 begin
  if uid is null then raise exception 'Authentication required'; end if;
+ if coalesce(payload->>'idempotency_key','')='' then raise exception 'Checkout request key required'; end if;
+ request_key:=(payload->>'idempotency_key')::uuid;
+ fingerprint:=md5((payload-'idempotency_key'-'total'-'subtotal')::text);
+ -- Serialize this customer's requests before stock/coupon locks; also covers concurrent retries.
+ perform id from public.customers where id=uid for update;
+ if not found then raise exception 'Customer profile required'; end if;
+ select * into previous from public.orders where customer_id=uid and idempotency_key=request_key;
+ if found then
+  if previous.request_fingerprint is distinct from fingerprint then raise exception 'Checkout request changed; start a new request'; end if;
+  return jsonb_build_object('id',previous.id,'total',previous.total,'payment_status',previous.payment_status);
+ end if;
  if coalesce(payload->>'payment_method','')<>'cod' then raise exception 'Payment gateway integration required'; end if;
  if jsonb_typeof(payload->'items') is distinct from 'array' then raise exception 'Invalid cart'; end if;
  if jsonb_array_length(payload->'items') not between 1 and 100 then raise exception 'Invalid cart size'; end if;
@@ -107,8 +124,8 @@ begin
   disc:=round(sub*cp.discount_percent/100.0);
   update public.coupons set used_count=used_count+1 where id=cp.id;
  end if;
- insert into public.orders(customer_id,items,subtotal,shipping_cost,discount_code,total,payment_method,gift_wrap,gift_card_text,governorate,name,phone,address)
- values(uid,snapshot,sub,ship,nullif(coupon_code,''),sub+ship+case when wrap then 50 else 0 end-disc,'cod',wrap,payload->>'gift_card_text',gov,payload->>'name',payload->>'phone',payload->>'address') returning id into result;
+ insert into public.orders(customer_id,items,subtotal,shipping_cost,discount_code,total,payment_method,gift_wrap,gift_card_text,governorate,name,phone,address,idempotency_key,request_fingerprint)
+ values(uid,snapshot,sub,ship,nullif(coupon_code,''),sub+ship+case when wrap then 50 else 0 end-disc,'cod',wrap,payload->>'gift_card_text',gov,payload->>'name',payload->>'phone',payload->>'address',request_key,fingerprint) returning id into result;
  for item in select * from jsonb_array_elements(snapshot) loop
   insert into public.order_items(order_id,product_id,quantity,price) values(result,(item->>'id')::uuid,(item->>'quantity')::int,(item->>'price')::int);
   update public.products set stock=stock-(item->>'quantity')::int,sales=sales+(item->>'quantity')::int where id=(item->>'id')::uuid;
@@ -156,3 +173,21 @@ grant usage on schema public to anon,authenticated;
 grant select on public.products,public.categories,public.shipping_rates,public.reviews to anon,authenticated;
 grant insert on public.subscribers,public.contact_messages to anon,authenticated;
 grant select,insert,update,delete on public.products,public.categories,public.customers,public.admins,public.shipping_rates,public.orders,public.order_items,public.coupons,public.reviews,public.carts,public.subscribers,public.contact_messages,public.payment_events to authenticated;
+
+
+-- Delivery does not imply collection: an administrator must explicitly confirm the cash receipt.
+create or replace function public.collect_cod_payment(p_order uuid) returns jsonb
+language plpgsql security definer set search_path=public as $$
+declare o public.orders%rowtype; collected timestamptz;
+begin
+ if auth.uid() is null or not public.is_admin() then raise exception 'Administrator access required'; end if;
+ select * into o from public.orders where id=p_order for update;
+ if not found or o.payment_method<>'cod' or o.order_status<>'delivered' then raise exception 'Only delivered cash-on-delivery orders can be collected'; end if;
+ if o.payment_status='paid' then return jsonb_build_object('changed',false,'payment_collected_at',o.payment_collected_at); end if;
+ collected:=now();
+ update public.orders set payment_status='paid',payment_collected_at=collected,payment_collected_by=auth.uid() where id=p_order;
+ insert into public.payment_events(transaction_id,order_id) values('cod:'||p_order::text,p_order);
+ return jsonb_build_object('changed',true,'payment_collected_at',collected);
+end;$$;
+revoke all on function public.collect_cod_payment(uuid) from public,anon;
+grant execute on function public.collect_cod_payment(uuid) to authenticated;

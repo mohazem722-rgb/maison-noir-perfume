@@ -13,6 +13,7 @@ import {
   Link,
   useLocation,
   useSearchParams,
+  useNavigate,
 } from "react-router-dom";
 import {
   ArrowUpRight,
@@ -47,8 +48,6 @@ import {
   BarChart3,
   Upload,
   Trash2,
-  Hexagon,
-  Play,
   ArrowDown,
   LockKeyhole,
 } from "lucide-react";
@@ -62,17 +61,47 @@ import {
   priceOf,
 } from "./data";
 import { supabase, api, stored } from "./lib";
-import "@fontsource/inter/latin-400.css";
-import "@fontsource/inter/latin-500.css";
-import "@fontsource/inter/latin-600.css";
-import "@fontsource/inter/latin-700.css";
-import "@fontsource/amiri/arabic-400.css";
-import "@fontsource/tajawal/arabic-400.css";
-import "@fontsource/tajawal/arabic-500.css";
+import "@fontsource/manrope/latin-400.css";
+import "@fontsource/manrope/latin-500.css";
+import "@fontsource/manrope/latin-600.css";
+import "@fontsource/manrope/latin-700.css";
+import "@fontsource/cairo/arabic-400.css";
+import "@fontsource/cairo/arabic-500.css";
+import "@fontsource/cairo/arabic-600.css";
+import "@fontsource/cairo/arabic-700.css";
 import "./styles.css";
-import { ScrollFilm } from "./ScrollFilm";
-type CartItem = { id: string; qty: number };
+import { Seo } from "./Seo";
+import { HeroVideo } from "./HeroVideo";
+import { saveStored } from "./storage";
+import { useCart } from "./useCart";
+import { ForgotPassword, ResetPassword } from "./AuthRecovery";
+import {
+  parseWish,
+  cartKey,
+  checkoutRequestKey,
+  finishCheckout,
+  type CartItem,
+} from "./cart";
+function SiteBackground() {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const update = () => {
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      // One original texture pixel per device pixel. Repeat instead of enlarging grain.
+      ref.current?.style.setProperty("--texture-width", `${1600 / dpr}px`);
+      ref.current?.style.setProperty("--texture-height", `${896 / dpr}px`);
+      document.documentElement.style.setProperty("--asset-dpr", String(dpr));
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+  return <div className="site-background" ref={ref} aria-hidden="true" />;
+}
+
 type Ctx = {
+  authReady: boolean;
+  catalogReady: boolean;
   shippingRates: Record<string, number>;
   ar: boolean;
   t: (en: string, ar: string) => string;
@@ -94,14 +123,37 @@ function App() {
   const [shippingRates, setShippingRates] = useState<Record<string, number>>(
     () => Object.fromEntries(governorates.map((g) => [g[0], g[2]])),
   );
-  const cartHydrated = useRef("");
-  const [ar, setAr] = useState(() => stored("mn-language", "ar") === "ar");
-  const [products, setProducts] = useState<Product[]>(seedProducts);
-  const [cart, setCart] = useState<CartItem[]>(() => stored("mn-cart", []));
-  const [wish, setWish] = useState<string[]>(() => stored("mn-wish", []));
+  const navigate = useNavigate();
+  const [authReady, setAuthReady] = useState(!supabase);
+  const [catalogReady, setCatalogReady] = useState(!supabase);
+  const [catalogFailed, setCatalogFailed] = useState(false);
+  const [ar, setAr] = useState(
+    () => stored<string>("mn-language", "en") === "ar",
+  );
+  const [products, setProducts] = useState<Product[]>(() =>
+    supabase ? [] : seedProducts,
+  );
+  const loadCatalog = async () => {
+    if (!supabase) return;
+    setCatalogReady(false);
+    setCatalogFailed(false);
+    try {
+      const { data, error } = await supabase.from("products").select("*");
+      if (error || !Array.isArray(data))
+        throw error || new Error("Catalog unavailable");
+      setProducts(data);
+      setCatalogReady(true);
+    } catch {
+      setCatalogFailed(true);
+    }
+  };
+  const [wish, setWish] = useState<string[]>(() =>
+    parseWish(stored("mn-wish", [])),
+  );
   const [cartOpen, setCartOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [user, setUser] = useState<AuthUser | null>(null);
+  const { cart, setCart } = useCart(products, catalogReady, user, authReady);
   const t = (en: string, arabic: string) => (ar ? arabic : en);
   const toastTimer = useRef<ReturnType<typeof setTimeout>>();
   const notify = (s: string) => {
@@ -112,15 +164,10 @@ function App() {
   useEffect(() => {
     document.documentElement.dir = ar ? "rtl" : "ltr";
     document.documentElement.lang = ar ? "ar" : "en";
-    localStorage.setItem("mn-language", JSON.stringify(ar ? "ar" : "en"));
+    saveStored("mn-language", ar ? "ar" : "en");
   }, [ar]);
   useEffect(() => {
-    localStorage.setItem("mn-cart", JSON.stringify(cart));
-    if (user && supabase && cartHydrated.current === user.id)
-      supabase.from("carts").upsert({ customer_id: user.id, items: cart });
-  }, [cart, user]);
-  useEffect(() => {
-    localStorage.setItem("mn-wish", JSON.stringify(wish));
+    saveStored("mn-wish", wish);
   }, [wish]);
   useEffect(() => {
     if (!supabase) return;
@@ -133,67 +180,51 @@ function App() {
             Object.fromEntries(data.map((r) => [r.governorate, r.price])),
           );
       });
-    const load = () =>
-      supabase!
-        .from("products")
-        .select("*")
-        .then(({ data, error }) => {
-          if (data && !error) setProducts(data);
-        });
-    load();
-    supabase.auth.getUser().then(({ data }) => setUser(data.user));
-    const { data } = supabase.auth.onAuthStateChange((_e, s) =>
-      setUser(s?.user || null),
-    );
+    loadCatalog();
+    let revision = 0;
+    let active = true;
+    supabase.auth
+      .getUser()
+      .then(({ data }) => {
+        if (active && revision === 0) {
+          setUser(data.user);
+          setAuthReady(true);
+        }
+      })
+      .catch(() => {
+        if (active && revision === 0) setAuthReady(true);
+      });
+    const { data } = supabase.auth.onAuthStateChange((event, session) => {
+      revision++;
+      setUser(session?.user || null);
+      setAuthReady(true);
+      if (event === "PASSWORD_RECOVERY")
+        navigate("/reset-password", { replace: true });
+    });
     const ch = supabase
       .channel("products")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "products" },
-        load,
+        loadCatalog,
       )
       .subscribe();
     return () => {
+      active = false;
       data.subscription.unsubscribe();
       supabase!.removeChannel(ch);
     };
   }, []);
-  useEffect(() => {
-    if (!user || !supabase) {
-      cartHydrated.current = "";
+  const add = (id: string) => {
+    if (!authReady || !catalogReady) {
+      notify(
+        t(
+          "Please wait for your session and catalog to load.",
+          "انتظر تحميل الحساب والمنتجات أولاً.",
+        ),
+      );
       return;
     }
-    let cancelled = false;
-    supabase
-      .from("carts")
-      .select("items")
-      .eq("customer_id", user.id)
-      .maybeSingle()
-      .then(({ data, error }) => {
-        if (cancelled) return;
-        if (error) {
-          notify(
-            t(
-              "Cart sync unavailable. Your bag is saved on this device.",
-              "مزامنة الحقيبة غير متاحة. حُفظت حقيبتك على هذا الجهاز.",
-            ),
-          );
-          return;
-        }
-        cartHydrated.current = user.id;
-        setCart((prev) => {
-          const merged = [...prev];
-          for (const item of data?.items || []) {
-            if (!merged.some((x) => x.id === item.id)) merged.push(item);
-          }
-          return merged;
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [user?.id]);
-  const add = (id: string) => {
     const p = products.find((p) => p.id === id);
     if (!p || p.stock < 1) {
       notify(t("This item is coming soon.", "هذا المنتج متاح قريباً."));
@@ -218,6 +249,8 @@ function App() {
   return (
     <Context.Provider
       value={{
+        authReady,
+        catalogReady,
         shippingRates,
         ar,
         t,
@@ -233,25 +266,56 @@ function App() {
         toggleWish,
       }}
     >
+      <Seo ar={ar} products={products} />
+      <SiteBackground />
       <ScrollManager />
       <Header setAr={setAr} />
       <main>
+        {!catalogReady && (
+          <div className="notice shell catalog-notice" role="status">
+            {catalogFailed
+              ? t(
+                  "The catalog is temporarily unavailable. Checkout is paused; demonstration products are not used in place of live stock.",
+                  "المنتجات غير متاحة مؤقتاً. تأكيد الطلب متوقف؛ لا نستبدل المخزون الحقيقي بمنتجات تجريبية.",
+                )
+              : t("Loading the catalog…", "جارٍ تحميل المنتجات…")}
+            {catalogFailed && (
+              <button className="btn glass" onClick={loadCatalog}>
+                {t("Retry", "إعادة المحاولة")}
+              </button>
+            )}
+          </div>
+        )}
         <Routes>
           <Route path="/" element={<Home />} />
-          <Route path="/products" element={<Products />} />
+          <Route path="/products" element={<Products key="catalog" />} />
           <Route path="/products/:id" element={<ProductPage />} />
-          <Route path="/offers" element={<Products mode="offers" />} />
+          <Route
+            path="/offers"
+            element={<Products key="offers" mode="offers" />}
+          />
           <Route
             path="/bestsellers"
-            element={<Products mode="bestsellers" />}
+            element={<Products key="bestsellers" mode="bestsellers" />}
           />
+          <Route
+            path="/wishlist"
+            element={<Products key="wishlist" mode="wishlist" />}
+          />
+          <Route path="/reset-password" element={<PasswordReset />} />
           <Route path="/about" element={<About />} />
           <Route path="/faq" element={<FAQ />} />
           <Route path="/contact" element={<Contact />} />
           <Route path="/returns" element={<Returns />} />
-          <Route path="/account" element={<Account />} />
-          <Route path="/checkout" element={<Checkout />} />
-          <Route path="/admin" element={<Admin />} />
+          <Route
+            path="/account"
+            element={<Account key={user?.id ?? "guest"} />}
+          />
+          <Route
+            path="/checkout"
+            element={<Checkout key={user?.id ?? "guest"} />}
+          />
+          <Route path="/admin" element={<Admin key={user?.id ?? "guest"} />} />
           <Route
             path="*"
             element={
@@ -348,13 +412,25 @@ function ScrollManager() {
 }
 function Logo() {
   return (
-    <Link className="logo" to="/" aria-label="Maison Noir home">
-      <span className="logo-symbol">
-        <Hexagon size={34} strokeWidth={1} />
-        <span>M</span>
-      </span>
-      <span>
-        MAISON NOIR<small>THE ART OF SCENT</small>
+    <Link className="logo logo-modern" to="/" aria-label="Maison Noir home">
+      <svg
+        className="logo-monogram"
+        width="42"
+        height="42"
+        viewBox="0 0 48 48"
+        fill="none"
+        aria-hidden="true"
+      >
+        <path
+          d="M6 37V10L24 29L42 10V37M19 37V10L42 37"
+          stroke="currentColor"
+          strokeWidth="1.35"
+          strokeLinejoin="miter"
+        />
+        <path d="M6 43H42" stroke="currentColor" strokeWidth=".65" />
+      </svg>
+      <span className="logo-wordmark">
+        MAISON NOIR<small>FINE FRAGRANCES</small>
       </span>
     </Link>
   );
@@ -383,17 +459,6 @@ function Header({
   }, [loc]);
   return (
     <>
-      <div className="announcement">
-        <span>
-          {t(
-            "A world of rare fragrances. A signature that is only yours.",
-            "عالم من العطور النادرة. بصمة لا تشبه إلا أنت.",
-          )}
-        </span>
-        <Link to="/products">
-          {t("DISCOVER YOUR SCENT", "اكتشف عطرك")} <ArrowUpRight size={12} />
-        </Link>
-      </div>
       <header className="header">
         <div className="header-inner">
           <Logo />
@@ -453,6 +518,9 @@ function Header({
                 <ArrowUpRight size={16} />
               </Link>
             ))}
+            <Link to="/wishlist">
+              {t("Saved fragrances", "العطور المحفوظة")}
+            </Link>
             <Link to="/account">{t("My account", "حسابي")}</Link>
           </nav>
         )}
@@ -470,6 +538,9 @@ function SearchPanel({ close }: { close: () => void }) {
         <Search size={20} />
         <input
           autoFocus
+          onKeyDown={(e) => {
+            if (e.key === "Escape") close();
+          }}
           placeholder={t("Find your signature scent…", "ابحث عن عطرك المميز…")}
           value={q}
           onChange={(e) => setQ(e.target.value)}
@@ -503,109 +574,70 @@ function SearchPanel({ close }: { close: () => void }) {
   );
 }
 function Hero() {
-  const { t, ar } = useShop();
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    let raf = 0;
-    let current = 0;
-    const reduced = window.matchMedia(
-      "(prefers-reduced-motion: reduce)",
-    ).matches;
-    const tick = () => {
-      const progress =
-        window.scrollY /
-        Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
-      current += (progress - current) * 0.12;
-      if (ref.current && !reduced)
-        ref.current.style.setProperty("--scrub", String(current));
-      raf = requestAnimationFrame(tick);
-    };
-    tick();
-    return () => cancelAnimationFrame(raf);
-  }, []);
+  const { t } = useShop();
   return (
-    <div className="hero-stage" ref={ref}>
-      <div className="hero-visual">
-        <img
-          src={ar ? "/images/hero-ar.jpg" : "/images/hero.jpg"}
-          alt={t(
-            "Maison Noir amber perfume wrapped in flowing golden silk",
-            "عطر ميزون نوار محاط بالحرير الذهبي",
-          )}
-        />
-        <ScrollFilm ar={ar} />
-        <div className="hero-shade" />
-      </div>
-      <section className="hero">
-        <div className="hero-content shell">
-          <div className="eyebrow hero-eyebrow">
-            <span />
-            {t(
-              "EXCEPTIONAL FRAGRANCES. TIMELESS IMPRESSIONS.",
-              "عطور استثنائية. انطباعات خالدة.",
-            )}
+    <div className="hero-stage hero-silver">
+      <section className="hero hero-editorial">
+        <HeroVideo />
+        <div className="hero-spotlight" aria-hidden="true" />
+        <div className="hero-layout shell">
+          <div className="hero-heading">
+            <h1>
+              <span>{t("Rare.", "نادر.")}</span>
+              <span>{t("Golden.", "ذهبي.")}</span>
+              <em>{t("Unveiled.", "يُكتشف.")}</em>
+            </h1>
           </div>
-          <div className="since">
-            <span>EST.</span> 2010 <i />
+          <figure className="perfume-photo">
+            <div className="perfume-display">
+              <span className="floor-pool" aria-hidden="true" />
+              <span className="bottle-cast-shadow" aria-hidden="true" />
+              <span className="floor-contact-shadow" aria-hidden="true" />
+              <picture>
+                <source
+                  type="image/webp"
+                  srcSet="/images/oud-wood-100ml-lossless.webp"
+                />
+                <img
+                  src="/images/oud-wood-100ml-original.png"
+                  width="870"
+                  height="1630"
+                  fetchPriority="high"
+                  decoding="sync"
+                  alt={t(
+                    "Tom Ford Oud Wood Eau de Parfum, 100ml — original product photograph",
+                    "صورة المنتج الأصلية: توم فورد عود وود أو دو بارفان، ١٠٠ مل",
+                  )}
+                />
+              </picture>
+            </div>
+          </figure>
+          <div className="hero-copy">
+            <p className="hero-intro">
+              {t(
+                "Not just a fragrance. An expression of you.",
+                "ليس مجرد عطر. بل تعبير عنك.",
+              )}
+            </p>
+            <p>
+              {t(
+                "Discover a world of extraordinary scents, thoughtfully curated for the unforgettable.",
+                "اكتشف عالماً من الروائح الاستثنائية، اختيرت بعناية لتترك أثراً لا يُنسى.",
+              )}
+            </p>
+            <div className="hero-buttons">
+              <Link className="btn gold" to="/products">
+                {t("Explore the Collection", "اكتشف المجموعة")}
+                <ArrowUpRight size={18} />
+              </Link>
+              <Link className="btn glass" to="/contact">
+                <MessageCircle size={19} strokeWidth={1.6} />
+                {t("Private Tasting", "تجربة خاصة")}
+              </Link>
+            </div>
           </div>
-          <h1>
-            {t("Rare.", "نادر.")}
-            <br />
-            {t("Golden.", "ذهبي.")}
-            <br />
-            <em>{t("Unveiled.", "يُكتشف.")}</em>
-          </h1>
-          <p>
-            {t(
-              "Not just a fragrance. An expression of you.\nDiscover a world of extraordinary scents, thoughtfully curated for the unforgettable.",
-              "ليس مجرد عطر. بل تعبير عنك.\nاكتشف عالماً من الروائح الاستثنائية، اختيرت بعناية لتترك أثراً لا يُنسى.",
-            )}
-          </p>
-          <div className="hero-buttons">
-            <Link className="btn gold" to="/products">
-              {t("Explore the Collection", "اكتشف المجموعة")}
-              <ArrowUpRight size={17} />
-            </Link>
-            <Link className="btn glass" to="/contact">
-              <span className="little-circle">
-                <Play size={10} />
-              </span>
-              {t("Private Tasting", "تجربة خاصة")}
-            </Link>
-          </div>
-          <div className="hero-note">
-            <span className="fine-line" />
-            {t(
-              "RARE INGREDIENTS. REMARKABLE STORIES.",
-              "مكونات نادرة. حكايات استثنائية.",
-            )}
-          </div>
-        </div>
-        <div className="hero-bottom shell">
-          <a href="#collection" className="scroll-label">
-            <span className="mouse">
-              <i />
-            </span>
-            {t("SCROLL TO DISCOVER", "مرّر لتكتشف")}
-            <ArrowDown size={12} />
-          </a>
-          <div className="hero-pagination">
-            <span>01</span>
-            <i />
-            <span>03</span>
-          </div>
-          <div className="hero-side-label">EAU DE LUXE — MAISON NOIR</div>
         </div>
       </section>
-      <div className="hero-scroll-spacer">
-        <span className="eyebrow">
-          {t("THE ART OF SLOW DISCOVERY", "فن الاكتشاف المتأني")}
-        </span>
-        <h2>
-          {t("Let the story", "دع الحكاية")} <em>{t("unfold.", "تتكشف.")}</em>
-        </h2>
-        <ArrowDown size={20} />
-      </div>
     </div>
   );
 }
@@ -728,7 +760,10 @@ function Home() {
             >
               <img src={c.image} alt={t(c.en, c.ar)} loading="lazy" />
               <span className="category-count">
-                {String(c.count).padStart(2, "0")} {t("FRAGRANCES", "عطراً")}
+                {String(
+                  products.filter((p) => p.category === c.slug).length,
+                ).padStart(2, "0")}{" "}
+                {t("FRAGRANCES", "عطراً")}
               </span>
               <div className="category-caption">
                 <div>
@@ -897,7 +932,12 @@ function Home() {
           <h2>
             {t("A passion for the rare.", "شغف بكل نادر.")}
             <br />
-            <em>{t("A love for the lasting.", "وحب لكل خالد.")}</em>
+            <em>
+              {t(
+                "An instinct for the unexpected.",
+                "وحدس يقود إلى غير المتوقّع.",
+              )}
+            </em>
           </h2>
           <p>
             {t(
@@ -1010,23 +1050,25 @@ function ProductCard({
 }
 function Countdown() {
   const { t } = useShop();
-  const [remaining, setRemaining] = useState(() => {
+  const [deadline] = useState(() => {
+    const saved = stored<unknown>("mn-offer-end", null);
     const end =
-      stored<number>("mn-offer-end", 0) ||
-      Date.now() + 4 * 86400000 + 11 * 3600000 + 23 * 60000;
-    localStorage.setItem("mn-offer-end", JSON.stringify(end));
-    return Math.max(0, end - Date.now());
+      typeof saved === "number" && Number.isFinite(saved) && saved > 0
+        ? saved
+        : Date.now() + 4 * 86400000 + 11 * 3600000 + 23 * 60000;
+    saveStored("mn-offer-end", end);
+    return end;
   });
+  const [remaining, setRemaining] = useState(() =>
+    Math.max(0, deadline - Date.now()),
+  );
   useEffect(() => {
     const id = setInterval(
-      () =>
-        setRemaining(
-          Math.max(0, stored<number>("mn-offer-end", Date.now()) - Date.now()),
-        ),
+      () => setRemaining(Math.max(0, deadline - Date.now())),
       1000,
     );
     return () => clearInterval(id);
-  }, []);
+  }, [deadline]);
   const vals = [
     Math.floor(remaining / 86400000),
     Math.floor(remaining / 3600000) % 24,
@@ -1084,13 +1126,11 @@ function Newsletter() {
             return;
           }
           const form = new FormData(e.currentTarget);
-          const { error } = await supabase
-            .from("subscribers")
-            .insert({
-              email: form.get("email"),
-              sms: form.get("sms") === "on",
-              phone: form.get("phone") || null,
-            });
+          const { error } = await supabase.from("subscribers").insert({
+            email: form.get("email"),
+            sms: form.get("sms") === "on",
+            phone: form.get("phone") || null,
+          });
           notify(
             error
               ? error.message
@@ -1166,6 +1206,7 @@ function Footer() {
         <div>
           <h4>{t("EXPLORE", "استكشف")}</h4>
           <Link to="/products">{t("The Collection", "المجموعة")}</Link>
+          <Link to="/wishlist">{t("Saved fragrances", "العطور المحفوظة")}</Link>
           <Link to="/bestsellers">{t("Bestsellers", "الأكثر مبيعاً")}</Link>
           <Link to="/offers">{t("Exclusive Offers", "عروض حصرية")}</Link>
           <Link to="/products?category=gift">
@@ -1271,23 +1312,34 @@ function PageIntro({
     </div>
   );
 }
-function Products({ mode }: { mode?: "offers" | "bestsellers" }) {
-  const { products, t, ar } = useShop();
+function Products({ mode }: { mode?: "offers" | "bestsellers" | "wishlist" }) {
+  const { products, t, ar, wish } = useShop();
+  const base =
+    mode === "bestsellers"
+      ? [...products].sort((a, b) => b.sales - a.sales).slice(0, 12)
+      : mode === "offers"
+        ? products.filter((p) => p.discount > 0)
+        : mode === "wishlist"
+          ? products.filter((p) => wish.includes(p.id))
+          : products;
+  const priceCeiling = Math.max(
+    150,
+    Math.ceil(Math.max(0, ...products.map(priceOf)) / 50) * 50,
+  );
   const [params, setParams] = useSearchParams();
   const cat = params.get("category") || "all";
   const [q, setQ] = useState("");
-  const [max, setMax] = useState(7000);
+  const [max, setMax] = useState<number | null>(null);
   const [brand, setBrand] = useState("all");
   const [size, setSize] = useState("all");
   const [sort, setSort] = useState(
     mode === "bestsellers" ? "bestseller" : "featured",
   );
   const [filters, setFilters] = useState(false);
-  let list = products.filter(
+  let list = base.filter(
     (p) =>
-      (mode !== "offers" || p.discount > 0) &&
       (cat === "all" || p.category === cat) &&
-      priceOf(p) <= max &&
+      priceOf(p) <= (max ?? priceCeiling) &&
       (brand === "all" || p.brand === brand) &&
       (size === "all" || p.size === size) &&
       (p.name_ar + p.name_en + p.brand + p.category)
@@ -1297,33 +1349,41 @@ function Products({ mode }: { mode?: "offers" | "bestsellers" }) {
   if (sort === "low") list.sort((a, b) => priceOf(a) - priceOf(b));
   if (sort === "high") list.sort((a, b) => priceOf(b) - priceOf(a));
   if (sort === "bestseller") list.sort((a, b) => b.sales - a.sales);
-  if (mode === "bestsellers") list = list.slice(0, 12);
+
   return (
     <div className="page shell">
       <PageIntro
         eyebrow={t(
-          mode === "offers"
-            ? "AN EXCEPTIONAL OPPORTUNITY"
-            : mode === "bestsellers"
-              ? "THE MOST LOVED"
-              : "YOUR SIGNATURE AWAITS",
-          mode === "offers"
-            ? "فرصة استثنائية"
-            : mode === "bestsellers"
-              ? "الأكثر حباً"
-              : "بصمتك تنتظرك",
+          mode === "wishlist"
+            ? "YOUR SAVED DISCOVERIES"
+            : mode === "offers"
+              ? "AN EXCEPTIONAL OPPORTUNITY"
+              : mode === "bestsellers"
+                ? "THE MOST LOVED"
+                : "YOUR SIGNATURE AWAITS",
+          mode === "wishlist"
+            ? "اكتشافاتك المحفوظة"
+            : mode === "offers"
+              ? "فرصة استثنائية"
+              : mode === "bestsellers"
+                ? "الأكثر حباً"
+                : "بصمتك تنتظرك",
         )}
         title={t(
-          mode === "offers"
-            ? "The art of a beautiful offer."
-            : mode === "bestsellers"
-              ? "Unforgettable favourites."
-              : "The fragrance collection.",
-          mode === "offers"
-            ? "فن العرض الجميل."
-            : mode === "bestsellers"
-              ? "عطور لا تُنسى."
-              : "مجموعة العطور.",
+          mode === "wishlist"
+            ? "Your saved fragrances."
+            : mode === "offers"
+              ? "The art of a beautiful offer."
+              : mode === "bestsellers"
+                ? "Unforgettable favourites."
+                : "The fragrance collection.",
+          mode === "wishlist"
+            ? "عطورك المحفوظة."
+            : mode === "offers"
+              ? "فن العرض الجميل."
+              : mode === "bestsellers"
+                ? "عطور لا تُنسى."
+                : "مجموعة العطور.",
         )}
         desc={t(
           "Discover extraordinary scents, chosen to become a part of your story.",
@@ -1389,7 +1449,7 @@ function Products({ mode }: { mode?: "offers" | "bestsellers" }) {
               className="icon-btn"
               onClick={() => {
                 setParams({});
-                setMax(7000);
+                setMax(null);
                 setBrand("all");
                 setSize("all");
                 setQ("");
@@ -1408,7 +1468,7 @@ function Products({ mode }: { mode?: "offers" | "bestsellers" }) {
                 onChange={() => setParams({})}
               />
               {t("All fragrances", "كل العطور")}
-              <span>90</span>
+              <span>{base.length}</span>
             </label>
             {categories.map((c) => (
               <label key={c.slug}>
@@ -1419,7 +1479,7 @@ function Products({ mode }: { mode?: "offers" | "bestsellers" }) {
                   onChange={() => setParams({ category: c.slug })}
                 />
                 {ar ? c.ar : c.en}
-                <span>{c.count}</span>
+                <span>{base.filter((p) => p.category === c.slug).length}</span>
               </label>
             ))}
           </fieldset>
@@ -1428,20 +1488,25 @@ function Products({ mode }: { mode?: "offers" | "bestsellers" }) {
             <input
               className="range"
               type="range"
-              min="150"
-              max="7000"
+              min="0"
+              max={priceCeiling}
+              aria-label={t("Maximum price", "أقصى سعر")}
               step="50"
-              value={max}
+              value={max ?? priceCeiling}
               onChange={(e) => setMax(+e.target.value)}
             />
             <div className="range-label">
-              <span>150 EGP</span>
-              <span>{money(max)} EGP</span>
+              <span>0 EGP</span>
+              <span>{money(max ?? priceCeiling)} EGP</span>
             </div>
           </fieldset>
           <fieldset>
             <legend>{t("HOUSE / BRAND", "العلامة التجارية")}</legend>
-            <select value={brand} onChange={(e) => setBrand(e.target.value)}>
+            <select
+              aria-label={t("House or brand", "العلامة التجارية")}
+              value={brand}
+              onChange={(e) => setBrand(e.target.value)}
+            >
               <option value="all">{t("All houses", "جميع العلامات")}</option>
               {[...new Set(products.map((p) => p.brand))].map((b) => (
                 <option key={b}>{b}</option>
@@ -1505,8 +1570,19 @@ function CouponCopy() {
   return (
     <button
       className="coupon-copy"
-      onClick={() => {
-        navigator.clipboard?.writeText("MAISON10");
+      onClick={async () => {
+        try {
+          if (!navigator.clipboard) throw new Error("Clipboard unavailable");
+          await navigator.clipboard.writeText("MAISON10");
+        } catch {
+          notify(
+            t(
+              "Could not copy. Enter MAISON10 manually.",
+              "تعذّر النسخ. اكتب MAISON10 يدوياً.",
+            ),
+          );
+          return;
+        }
         notify(
           t(
             "MAISON10 copied. Demo coupon: 10% off.",
@@ -1645,7 +1721,16 @@ function CartDrawer({ close }: { close: () => void }) {
   );
 }
 function Checkout() {
-  const { cart, products, t, user, notify, setCart, shippingRates } = useShop();
+  const {
+    cart,
+    products,
+    t,
+    user,
+    notify,
+    setCart,
+    shippingRates,
+    catalogReady,
+  } = useShop();
   const [gov, setGov] = useState("Cairo");
   const [wrap, setWrap] = useState(false);
   const [method, setMethod] = useState("cod");
@@ -1707,6 +1792,15 @@ function Checkout() {
         className="checkout-layout"
         onSubmit={async (e) => {
           e.preventDefault();
+          if (!catalogReady) {
+            notify(
+              t(
+                "The catalog is unavailable. Please retry shortly.",
+                "المنتجات غير متاحة. حاول بعد قليل.",
+              ),
+            );
+            return;
+          }
           if (!user) {
             notify(
               t(
@@ -1728,7 +1822,7 @@ function Checkout() {
           setBusy(true);
           const form = new FormData(e.currentTarget);
           try {
-            const result = await api("orders/create", {
+            const payload = {
               items: cart,
               governorate: gov,
               gift_wrap: wrap,
@@ -1738,7 +1832,17 @@ function Checkout() {
               address: form.get("address"),
               phone: form.get("phone"),
               name: form.get("name"),
-            });
+            };
+            const result = await api(
+              "orders/create",
+              {
+                ...payload,
+                idempotency_key: await checkoutRequestKey(user.id, payload),
+              },
+              user.id,
+            );
+            finishCheckout(user.id);
+            saveStored(cartKey(user.id), []);
             setOrder(result.id);
             setCart([]);
           } catch (err) {
@@ -1931,7 +2035,11 @@ function Checkout() {
             <span>{t("Total", "الإجمالي")}</span>
             <b>{money(total)} EGP</b>
           </div>
-          <button className="btn gold full" disabled={busy} type="submit">
+          <button
+            className="btn gold full"
+            disabled={busy || !catalogReady}
+            type="submit"
+          >
             {busy
               ? t("Processing…", "جارٍ المعالجة…")
               : t("Place order", "إتمام الطلب")}
@@ -1960,7 +2068,8 @@ function Field({
   );
 }
 function ProductPage() {
-  const { products, ar, t, add, wish, toggleWish, user, notify } = useShop();
+  const { products, ar, t, add, wish, toggleWish, user, notify, catalogReady } =
+    useShop();
   const id = useLocation().pathname.split("/").pop();
   const p = products.find((p) => p.id === id);
   const [lightbox, setLightbox] = useState(false);
@@ -1975,6 +2084,14 @@ function ProductPage() {
         .eq("product_id", p.id)
         .then(({ data }) => setReviews(data || []));
   }, [p?.id]);
+  if (!p && !catalogReady)
+    return (
+      <div className="page shell">
+        <p>
+          {t("Waiting for catalog availability…", "في انتظار إتاحة المنتجات…")}
+        </p>
+      </div>
+    );
   if (!p)
     return (
       <div className="page shell">
@@ -2358,13 +2475,11 @@ function Contact() {
               return;
             }
             const f = new FormData(e.currentTarget);
-            const { error } = await supabase
-              .from("contact_messages")
-              .insert({
-                name: f.get("name"),
-                phone: f.get("phone"),
-                message: f.get("message"),
-              });
+            const { error } = await supabase.from("contact_messages").insert({
+              name: f.get("name"),
+              phone: f.get("phone"),
+              message: f.get("message"),
+            });
             notify(
               error
                 ? error.message
@@ -2420,8 +2535,20 @@ function Contact() {
     </div>
   );
 }
+function PasswordReset() {
+  const { user, ar, notify, authReady } = useShop();
+  return (
+    <ResetPassword
+      ar={ar}
+      notify={notify}
+      authenticated={!!user}
+      authReady={authReady}
+    />
+  );
+}
 function Account() {
-  const { user, t, notify } = useShop();
+  const { user, t, notify, ar } = useShop();
+  const [forgot, setForgot] = useState(false);
   const [register, setRegister] = useState(false);
   const [busy, setBusy] = useState(false);
   const [orders, setOrders] = useState<any[]>([]);
@@ -2452,6 +2579,10 @@ function Account() {
       };
     }
   }, [user]);
+  if (forgot)
+    return (
+      <ForgotPassword ar={ar} notify={notify} onBack={() => setForgot(false)} />
+    );
   if (user)
     return (
       <div className="page shell">
@@ -2464,6 +2595,9 @@ function Account() {
           <LogOut size={16} />
           {t("Sign out", "تسجيل الخروج")}
         </button>
+        <Link className="btn glass" to="/wishlist">
+          {t("Saved fragrances", "العطور المحفوظة")}
+        </Link>
         <h2 className="orders-heading">{t("Your orders", "طلباتك")}</h2>
         {!orders.length && (
           <div className="empty">
@@ -2617,6 +2751,11 @@ function Account() {
                 )}
           </button>
         </form>
+        {!register && (
+          <button className="text-link" onClick={() => setForgot(true)}>
+            {t("Forgot password?", "نسيت كلمة المرور؟")}
+          </button>
+        )}
         <button className="text-link" onClick={() => setRegister(!register)}>
           {t(
             register
@@ -2823,6 +2962,48 @@ function Admin() {
               <p>
                 {o.name} · {o.phone} · {o.address} · {o.governorate}
               </p>
+              {o.payment_method === "cod" &&
+                o.order_status === "delivered" &&
+                o.payment_status !== "paid" && (
+                  <button
+                    className="btn glass"
+                    onClick={async () => {
+                      if (
+                        !confirm(
+                          t(
+                            `Confirm receipt of ${money(o.total)} EGP?`,
+                            `تأكيد استلام ${money(o.total)} جنيه؟`,
+                          ),
+                        )
+                      )
+                        return;
+                      const { data, error } = await supabase!.rpc(
+                        "collect_cod_payment",
+                        { p_order: o.id },
+                      );
+                      if (error) notify(error.message);
+                      else {
+                        setOrders((rows) =>
+                          rows.map((row) =>
+                            row.id === o.id
+                              ? {
+                                  ...row,
+                                  payment_status: "paid",
+                                  payment_collected_at:
+                                    data.payment_collected_at,
+                                }
+                              : row,
+                          ),
+                        );
+                        notify(
+                          t("Cash receipt recorded.", "تم تسجيل تحصيل المبلغ."),
+                        );
+                      }
+                    }}
+                  >
+                    {t("Record cash received", "تسجيل تحصيل المبلغ")}
+                  </button>
+                )}
               <select
                 value={o.order_status}
                 onChange={async (e) => {
@@ -3103,7 +3284,9 @@ function SalesReports({ orders }: { orders: any[] }) {
             : date.toLocaleString("en", { month: "short" }),
         date: key,
         value: paid
-          .filter((o) => o.created_at.startsWith(key))
+          .filter((o) =>
+            (o.payment_collected_at || o.created_at).startsWith(key),
+          )
           .reduce((n, o) => n + o.total, 0),
       };
     },
