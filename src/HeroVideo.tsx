@@ -1,8 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 
-export const HERO_VIDEO_URL =
-  import.meta.env.VITE_HERO_VIDEO_URL?.trim() ||
-  "https://v1.pinimg.com/videos/iht/720p/f9/ea/c2/f9eac2df7c642573229dd098ba61d13f.mp4";
+/**
+ * Optional decorative hero video.
+ *
+ * It is intentionally OFF by default: the previous build streamed a third-party
+ * (Pinterest CDN) clip that we do not own, which is both a copyright risk and an
+ * unnecessary external dependency. Set VITE_HERO_VIDEO_URL to a clip you own or
+ * have licensed (for example a file under /videos) to enable it again.
+ */
+export const HERO_VIDEO_URL = (
+  import.meta.env.VITE_HERO_VIDEO_URL || ""
+).trim();
 
 /** Decorative, full-hero spark backdrop. The bottle and studio lighting stay above it. */
 export function HeroVideo() {
@@ -10,6 +18,7 @@ export function HeroVideo() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
+    if (!HERO_VIDEO_URL) return;
     const resume = () => {
       const video = videoRef.current;
       if (!ready || !video || document.visibilityState !== "visible") return;
@@ -25,6 +34,8 @@ export function HeroVideo() {
       document.removeEventListener("visibilitychange", resume);
     };
   }, [ready]);
+
+  if (!HERO_VIDEO_URL) return null;
 
   return (
     <div

@@ -1,0 +1,113 @@
+name: Security
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  schedule:
+    # Weekly, so a newly published CVE is caught even when nobody commits.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install (locked)
+        run: npm ci --ignore-scripts
+
+      # Fails the build on high or critical advisories in production code.
+      - name: npm audit (production dependencies)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: npm audit (full report, non-blocking)
+        run: npm audit || true
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Block committed credentials
+        run: |
+          set -euo pipefail
+          echo "Scanning tracked files for live credentials…"
+          # Supabase/PostgREST JWTs, Resend keys, Paymob/Twilio tokens, private keys.
+          PATTERNS='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9|re_[A-Za-z0-9]{24,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|SK[0-9a-f]{32}'
+          if git grep -nIE "$PATTERNS" -- . \
+              ':!*.example' ':!package-lock.json' ':!README.md' ':!supabase/*.sql' >/tmp/hits 2>/dev/null; then
+            echo "::error::Possible credential committed to the repository."
+            cat /tmp/hits
+            exit 1
+          fi
+          echo "No credentials found in tracked files."
+
+      - name: Service-role key must never reach the client bundle
+        run: |
+          set -euo pipefail
+          if grep -rn "SERVICE_ROLE" src/ index.html 2>/dev/null; then
+            echo "::error::SERVICE_ROLE referenced in browser code. It must stay server-side only."
+            exit 1
+          fi
+          echo "Client bundle is clean."
+
+  build:
+    name: Type-check, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  headers:
+    name: Security headers present
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify vercel.json hardening
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require("fs");
+          const config = JSON.parse(fs.readFileSync("vercel.json", "utf8"));
+          const required = [
+            "Content-Security-Policy",
+            "Strict-Transport-Security",
+            "X-Content-Type-Options",
+            "X-Frame-Options",
+            "Referrer-Policy",
+            "Permissions-Policy",
+          ];
+          const declared = new Set(
+            (config.headers || []).flatMap((entry) =>
+              (entry.headers || []).map((header) => header.key),
+            ),
+          );
+          const missing = required.filter((key) => !declared.has(key));
+          if (missing.length) {
+            console.error("Missing security headers:", missing.join(", "));
+            process.exit(1);
+          }
+          console.log("All required security headers are declared.");
+          NODE
