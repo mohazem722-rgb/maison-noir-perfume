@@ -50,6 +50,8 @@ import {
   Trash2,
   ArrowDown,
   LockKeyhole,
+  Sparkles,
+  ScrollText,
 } from "lucide-react";
 import type { User as AuthUser } from "@supabase/supabase-js";
 import {
@@ -307,6 +309,8 @@ function App() {
           <Route path="/faq" element={<FAQ />} />
           <Route path="/contact" element={<Contact />} />
           <Route path="/returns" element={<Returns />} />
+          <Route path="/privacy" element={<Privacy />} />
+          <Route path="/terms" element={<Terms />} />
           <Route
             path="/account"
             element={<Account key={user?.id ?? "guest"} />}
@@ -655,10 +659,10 @@ function ServiceStrip() {
         ],
         [
           ShieldCheck,
-          "AUTHENTIC, ALWAYS",
-          "أصالة دون مساومة",
-          "100% original fragrances",
-          "عطور أصلية ١٠٠٪",
+          "SOURCED WITH CARE",
+          "مصادر موثوقة",
+          "Selected from known suppliers",
+          "مختارة من موردين معروفين",
         ],
         [
           Gift,
@@ -1031,7 +1035,11 @@ function ProductCard({
           </span>
           <span className="rating">
             <Star size={10} fill="currentColor" />
-            {p.rating.toFixed(1)}
+            {p.reviews_count > 0 ? (
+              p.rating.toFixed(1)
+            ) : (
+              <em>{t("New", "جديد")}</em>
+            )}
           </span>
         </div>
         <div className="price">
@@ -2122,11 +2130,21 @@ function ProductPage() {
           <h1>{ar ? p.name_ar : p.name_en}</h1>
           <div className="rating">
             <Star size={15} fill="currentColor" />
-            {p.rating.toFixed(1)}{" "}
-            <span>
-              ({p.reviews_count}{" "}
-              {t("ratings · catalog data", "تقييماً · بيانات الكتالوج")})
-            </span>
+            {p.reviews_count > 0 ? (
+              <>
+                {p.rating.toFixed(1)}{" "}
+                <span>
+                  ({p.reviews_count} {t("verified reviews", "مراجعة موثقة")})
+                </span>
+              </>
+            ) : (
+              <span>
+                {t(
+                  "No reviews yet — be the first",
+                  "لا مراجعات بعد — كن الأول",
+                )}
+              </span>
+            )}
           </div>
           <p>
             {t(
@@ -2170,7 +2188,7 @@ function ProductPage() {
           <div className="detail-benefits">
             <span>
               <ShieldCheck size={17} />
-              {t("Authenticity assured", "أصالة مضمونة")}
+              {t("Sourced with care", "مصدر موثوق")}
             </span>
             <span>
               <Truck size={17} />
@@ -2323,17 +2341,42 @@ function About() {
         </div>
       </div>
       <SectionHead
-        eyebrow={t("A GLIMPSE INSIDE", "نظرة إلى الداخل")}
-        title={t("The world of our maison.", "عالم دارنا.")}
+        eyebrow={t("WHAT GUIDES US", "ما يوجهنا")}
+        title={t("Three promises.", "ثلاثة وعود.")}
       />
       <div className="store-grid">
-        {[1, 2, 3].map((n) => (
-          <div key={n}>
-            <MapPin size={25} />
-            <h3>{t(`Store photograph ${n}`, `صورة المتجر ${n}`)}</h3>
-            <p>{t("Coming soon — to be confirmed", "قريباً — يُؤكد لاحقاً")}</p>
-          </div>
-        ))}
+        {[
+          [
+            Sparkles,
+            "CURATED, NOT CROWDED",
+            "اختيار منتَقى لا مزدحم",
+            "Every bottle earns its place. We keep the collection focused so choosing is a pleasure, not a chore.",
+            "كل عطر له مكانه. نُبقي المجموعة محدودة لتكون عملية الاختيار متعة لا عبء.",
+          ],
+          [
+            Truck,
+            "DELIVERED ACROSS EGYPT",
+            "توصيل لكل مصر",
+            "Protected, discreet packaging to all 27 governorates, with cash on delivery available.",
+            "تغليف محمي وبسرية تامة لجميع المحافظات الـ٢٧، مع إمكانية الدفع عند الاستلام.",
+          ],
+          [
+            MessageCircle,
+            "A REAL PERSON REPLIES",
+            "شخص حقيقي يرد عليك",
+            "Write to us through the contact page and our team will help you choose — no bots, no scripts.",
+            "راسلنا من صفحة التواصل وسيساعدك فريقنا في الاختيار — بدون ردود آلية.",
+          ],
+        ].map(([Icon, en, ar, body, bodyAr], i) => {
+          const I = Icon as typeof MapPin;
+          return (
+            <div key={i}>
+              <I size={25} />
+              <h3>{t(en as string, ar as string)}</h3>
+              <p>{t(body as string, bodyAr as string)}</p>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -2449,6 +2492,140 @@ function Returns() {
     </div>
   );
 }
+function Privacy() {
+  const { t } = useShop();
+  return (
+    <div className="page shell narrow">
+      <PageIntro
+        eyebrow={t("YOUR DATA, EXPLAINED", "بياناتك، بالتفصيل")}
+        title={t("Privacy policy.", "سياسة الخصوصية.")}
+        desc={t(
+          "Plain language. No small print.",
+          "بلغة واضحة. بلا شروط خفية.",
+        )}
+      />
+      {[
+        [
+          "What we collect",
+          "ما نجمعه",
+          "When you create an account we store your name, email address and phone number. When you place an order we also store the delivery address and governorate. We keep a record of your orders, and of any review you choose to publish.",
+          "عند إنشاء حساب نخزن اسمك وبريدك الإلكتروني ورقم هاتفك. وعند تقديم طلب نخزن أيضاً عنوان التوصيل والمحافظة. نحتفظ بسجل طلباتك وبأي مراجعة تختار نشرها.",
+        ],
+        [
+          "Why we collect it",
+          "لماذا نجمعها",
+          "Only to run the store: to create and deliver your order, to contact you about it, to let you sign in again, and to show your published reviews. We do not sell your data and we do not use it for advertising.",
+          "فقط لتشغيل المتجر: إنشاء طلبك وتوصيله، والتواصل معك بشأنه، والسماح لك بتسجيل الدخول مرة أخرى، وعرض مراجعاتك المنشورة. نحن لا نبيع بياناتك ولا نستخدمها في الإعلانات.",
+        ],
+        [
+          "Who can see it",
+          "من يستطيع رؤيتها",
+          "Your account, orders and address are visible to you and to the store administrator — nobody else. Reviews you publish are public by design, and show only your rating, comment and date, never your contact details.",
+          "حسابك وطلباتك وعنوانك مرئية لك ولإدارة المتجر فقط. المراجعات التي تنشرها علنية بطبيعتها، وتظهر التقييم والكلام والتاريخ فقط — دون بيانات التواصل.",
+        ],
+        [
+          "Who processes it for us",
+          "من يعالجها بالنيابة عنا",
+          "The store runs on Supabase (database and sign-in) and is hosted on Vercel. Card payments are not currently accepted; cash on delivery is collected by the courier.",
+          "يعمل المتجر على Supabase (قاعدة البيانات وتسجيل الدخول) ويُستضاف على Vercel. لا نقبل الدفع بالبطاقة حالياً؛ ويُحصَّل الدفع عند الاستلام بواسطة مندوب التوصيل.",
+        ],
+        [
+          "How long we keep it",
+          "مدة الاحتفاظ بها",
+          "Order records are kept for as long as needed to honour returns and to meet accounting obligations. You may ask us to delete your account and personal data at any time, except records we are legally required to keep.",
+          "يُحتفظ بسجلات الطلبات للمدة اللازمة لتلبية الاسترجاع والالتزامات المحاسبية. يمكنك أن تطلب منا حذف حسابك وبياناتك الشخصية في أي وقت، عدا السجلات التي يلزمنا القانون بالاحتفاظ بها.",
+        ],
+        [
+          "Cookies and local storage",
+          "ملفات تعريف الارتباط والتخزين المحلي",
+          "We do not use advertising or tracking cookies. Your browser stores your cart, saved fragrances and sign-in session locally so the store works between visits.",
+          "لا نستخدم ملفات تعريف ارتباط للإعلانات أو التتبع. يحفظ متصفحك سلة مشترياتك وعطورك المحفوظة وجلسة الدخول محلياً ليعمل المتجر بين الزيارات.",
+        ],
+        [
+          "Your choices",
+          "خياراتك",
+          "You can access or correct your details from your account, unsubscribe at any time from marketing messages, and ask us to delete your data through the contact page.",
+          "يمكنك الاطلاع على بياناتك أو تصحيحها من حسابك، وإلغاء الاشتراك في الرسائل التسويقية في أي وقت، وطلب حذف بياناتك من صفحة التواصل.",
+        ],
+      ].map(([en, ar, body, bodyAr]) => (
+        <section className="policy-block" key={en}>
+          <h2>{t(en, ar)}</h2>
+          <p>{t(body, bodyAr)}</p>
+        </section>
+      ))}
+      <Link to="/contact" className="btn gold">
+        {t("Request data deletion", "اطلب حذف بياناتك")}
+      </Link>
+    </div>
+  );
+}
+function Terms() {
+  const { t } = useShop();
+  return (
+    <div className="page shell narrow">
+      <PageIntro
+        eyebrow={t("THE GROUND RULES", "قواعد التعامل")}
+        title={t("Terms of sale.", "شروط البيع.")}
+        desc={t(
+          "What you can expect from us, and what we ask of you.",
+          "ما تتوقعه منا، وما نطلبه منك.",
+        )}
+      />
+      {[
+        [
+          "Orders and prices",
+          "الطلبات والأسعار",
+          "All prices are shown in Egyptian pounds and include applicable taxes. An order is confirmed only after we accept it; if an item turns out to be unavailable we will contact you before anything is charged or shipped.",
+          "جميع الأسعار بالجنيه المصري وتشمل الضرائب المقررة. لا يُعد الطلب مؤكداً إلا بعد قبولنا له؛ وإذا تبيّن أن منتجاً غير متوفر سنتواصل معك قبل التحصيل أو الشحن.",
+        ],
+        [
+          "Payment",
+          "الدفع",
+          "Cash on delivery is the only payment method currently offered. Card and wallet payment will only be enabled once a licensed payment provider is connected; we will never ask for card details by phone or message.",
+          "الدفع عند الاستلام هو الوسيلة الوحيدة المتاحة حالياً. لن يُفعَّل الدفع بالبطاقة أو المحفظة إلا بعد ربط مزوّد دفع مرخص؛ ولن نطلب بيانات بطاقتك عبر الهاتف أو الرسائل.",
+        ],
+        [
+          "Delivery",
+          "التوصيل",
+          "We deliver to all 27 governorates. The shipping fee and estimated delivery window for your governorate are shown at checkout before you confirm the order.",
+          "نوصل إلى المحافظات الـ٢٧. تظهر رسوم الشحن والمدة المتوقعة لمحافظتك عند إتمام الطلب قبل التأكيد.",
+        ],
+        [
+          "Product information",
+          "بيانات المنتجات",
+          "We describe each fragrance as accurately as we can. Packaging and bottle design can change between batches, and photographs may differ slightly from the item you receive.",
+          "نصف كل عطر بأكبر دقة ممكنة. قد تتغير العبوة أو تصميم الزجاجة بين الدفعات، وقد تختلف الصور قليلاً عن المنتج الذي تستلمه.",
+        ],
+        [
+          "Reviews",
+          "المراجعات",
+          "Reviews must reflect a genuine experience with the product. We may remove content that is abusive, misleading, or that advertises another business.",
+          "يجب أن تعكس المراجعات تجربة حقيقية مع المنتج. ويجوز لنا حذف أي محتوى مسيء أو مضلل أو يروّج لنشاط تجاري آخر.",
+        ],
+        [
+          "Returns",
+          "الاسترجاع",
+          "Returns follow our returns policy, and your statutory rights under Egyptian consumer protection law are not affected by these terms.",
+          "يخضع الاسترجاع لسياسة الاسترجاع الخاصة بنا، ولا تؤثر هذه الشروط على حقوقك القانونية وفق قانون حماية المستهلك المصري.",
+        ],
+        [
+          "Contact",
+          "التواصل",
+          "Questions about an order or these terms can be sent through the contact page, and we will reply as soon as we can.",
+          "يمكن إرسال أي استفسار عن طلب أو عن هذه الشروط من صفحة التواصل، وسنرد في أقرب وقت.",
+        ],
+      ].map(([en, ar, body, bodyAr]) => (
+        <section className="policy-block" key={en}>
+          <h2>{t(en, ar)}</h2>
+          <p>{t(body, bodyAr)}</p>
+        </section>
+      ))}
+      <Link to="/contact" className="btn gold">
+        {t("Ask a question", "اسأل سؤالاً")}
+      </Link>
+    </div>
+  );
+}
 function Contact() {
   const { t, notify } = useShop();
   return (
@@ -2508,26 +2685,37 @@ function Contact() {
           <div>
             <MapPin size={19} />
             <p>
-              <b>{t("Our branches", "فروعنا")}</b>
+              <b>{t("Where we deliver", "نطاق التوصيل")}</b>
               <span>
-                {t("Coming soon — to be confirmed", "قريباً — يُؤكد لاحقاً")}
+                {t("All 27 governorates of Egypt", "جميع محافظات مصر الـ٢٧")}
               </span>
             </p>
           </div>
           <div>
             <Phone size={19} />
             <p>
-              <b>{t("Speak to us", "اتصل بنا")}</b>
+              <b>{t("How we reply", "طريقة الرد")}</b>
               <span>
-                {t("Coming soon — to be confirmed", "قريباً — يُؤكد لاحقاً")}
+                {t(
+                  "Through this form — usually within one business day",
+                  "عبر هذا النموذج — عادة خلال يوم عمل واحد",
+                )}
               </span>
             </p>
           </div>
           <div className="map-placeholder">
-            <MapPin size={28} />
-            <p>{t("Branch map coming soon", "خريطة الفروع قريباً")}</p>
+            <Truck size={28} />
+            <p>
+              {t(
+                "Cash on delivery is available on every order.",
+                "الدفع عند الاستلام متاح على كل طلب.",
+              )}
+            </p>
             <small>
-              {t("Location to be confirmed", "يُؤكد الموقع لاحقاً")}
+              {t(
+                "Order to your door, pay the courier.",
+                "اطلب حتى بابك وادفع للمندوب.",
+              )}
             </small>
           </div>
         </div>
